@@ -13,7 +13,7 @@ import fitz
 import pytesseract
 from PIL import Image
 
-DPI = 200
+DPI = 100
 CELL_CFG = "--psm 10 -c tessedit_char_whitelist=0123456789"
 
 def _img(doc, i):

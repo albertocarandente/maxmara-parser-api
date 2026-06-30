@@ -181,13 +181,14 @@ def parse_any_brand():
         finally:
             os.unlink(path)
 
-    # Non-MaxMara: job asincrono con AI su Railway
+    # PT Torino / altri: job asincrono con parser OCR deterministico
+    from pttorino_order_parser import parse_order as parse_pttorino
     job_id = str(uuid.uuid4())
     with _jobs_lock:
         _jobs[job_id] = {"status": "processing"}
 
     def runner():
-        _run_job(job_id, path, _analyze_with_ai)
+        _run_job(job_id, path, parse_pttorino)
 
     threading.Thread(target=runner, daemon=True).start()
     brand_name = brand or "sconosciuto"
