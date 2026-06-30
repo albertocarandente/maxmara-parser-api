@@ -1,3 +1,5 @@
-flask>=3.0
-pymupdf>=1.23.0
-gunicorn>=21.2
+flask
+pymupdf
+pytesseract
+pillow
+gunicorn
