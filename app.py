@@ -1,37 +1,130 @@
 """
 Servizio Railway: parsing ordini PDF multi-brand.
-
-Pattern sincrono vs asincrono:
-  - MaxMara: parsing deterministico, < 1s -> risposta sincrona (invariato per Vercel).
-  - Brand con OCR (es. PT Torino): misurato 60-110s su un ordine di 4 pagine -> NESSUNA
-    richiesta HTTP sincrona regge questo tempo in modo affidabile. Si usa un pattern a
-    job: il client invia il PDF, riceve subito un job_id, e fa polling su /jobs/<id>
-    finche' lo stato non e' "done".
-
-Espone:
-  GET  /health              -> verifica dipendenze (tesseract)
-  POST /parse-maxmara        -> SINCRONO, compatibilita' con l'integrazione gia' attiva
-  POST /parse                -> riconosce il brand; se rapido risponde subito (200),
-                                 se richiede OCR risponde 202 + job_id
-  GET  /jobs/<job_id>        -> stato/risultato di un job asincrono
+- MaxMara: deterministico (<1s, risposta sincrona)
+- Altri brand: AI vision su Railway (GPT-4o-mini, job async, nessun timeout)
 """
 import os
-import shutil
+import base64
+import io
+import json
 import tempfile
 import threading
 import traceback
 import uuid
 
 from flask import Flask, request, jsonify
+import fitz
 
-from order_router import parse as router_parse, detect_brand
 from maxmara_order_parser import parse_order as parse_maxmara
+from order_router import detect_brand
 
 app = Flask(__name__)
 
 _jobs = {}
 _jobs_lock = threading.Lock()
 
+MAX_UPLOAD_MB = 25
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+
+# ── AI analysis (for non-MaxMara brands) ────────────────────────────────────
+
+AI_SYSTEM_PROMPT = """Sei un assistente specializzato nell'estrazione dati da documenti di ordine per brand di moda.
+Restituisci ESCLUSIVAMENTE un JSON valido:
+{"products":[{"modello":"...","descrizione":"...","variante":"...","prezzoAcquisto":"...","taglie":"1 - 30  1 - 31"}],"numeroOrdine":null,"brand":null,"fornitore":null,"stagione":null,"genere":null}
+Ogni prodotto DEVE avere: modello, variante, prezzoAcquisto, taglie.
+Le taglie in formato: "1 - 30  2 - 31  1 - 32"."""
+
+def _analyze_with_ai(path):
+    """Convert PDF to images, send to OpenRouter GPT-4o-mini."""
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY non configurata su Railway")
+
+    doc = fitz.open(path)
+    images_b64 = []
+    for i in range(min(doc.page_count, 5)):  # max 5 pages
+        pix = doc[i].get_pixmap(dpi=150)
+        images_b64.append(base64.b64encode(pix.tobytes("png")).decode())
+
+    content = []
+    for b64 in images_b64:
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+    content.append({"type": "text", "text": "Estrai TUTTI i prodotti da questo ordine in formato JSON."})
+
+    import urllib.request
+    body = json.dumps({
+        "model": "openai/gpt-4o-mini",
+        "max_tokens": 4096,
+        "messages": [
+            {"role": "system", "content": AI_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://etienne-studio.vercel.app",
+            "X-Title": "ETIENNE Studio",
+        },
+    )
+
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = json.loads(resp.read())
+        raw = data["choices"][0]["message"]["content"]
+        # Parse JSON from response
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0]
+        result = json.loads(raw)
+        products = result.get("products", [])
+        capi = []
+        for p in products:
+            capi.append({
+                "modello": p.get("modello", ""),
+                "nome": p.get("descrizione"),
+                "var": p.get("variante", ""),
+                "art": p.get("motivo"),
+                "scala": "A",
+                "taglie": _parse_sizes(p.get("taglie", "")),
+                "tot_capi": _count_sizes(p.get("taglie", "")),
+                "prezzo": _parse_price(p.get("prezzoAcquisto", "")),
+                "importo": None,
+            })
+        tot_capi = sum(c["tot_capi"] or 0 for c in capi)
+        return {
+            "valido": True,
+            "brand": "ai",
+            "n_capi_righe": len(capi),
+            "totale_capi": tot_capi,
+            "totale_importo": 0,
+            "capi": capi,
+            "errori": [],
+            "products": products,
+        }
+
+def _parse_sizes(s):
+    """'1 - 30  2 - 31' -> {'30': 1, '31': 2}"""
+    import re
+    sizes = {}
+    for m in re.finditer(r'(\d+)\s*-\s*(\w+)', s):
+        sizes[m.group(2)] = int(m.group(1))
+    return sizes
+
+def _count_sizes(s):
+    import re
+    return sum(int(m.group(1)) for m in re.finditer(r'(\d+)\s*-\s*\w+', s))
+
+def _parse_price(s):
+    try:
+        return float(s.replace(",", "."))
+    except:
+        return None
+
+# ── Endpoints ───────────────────────────────────────────────────────────────
 
 def _run_job(job_id, path, parse_fn):
     try:
@@ -51,18 +144,11 @@ def _run_job(job_id, path, parse_fn):
         except OSError:
             pass
 
-MAX_UPLOAD_MB = 25
-app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
-
 
 @app.get("/health")
 def health():
-    tesseract_path = shutil.which("tesseract")
-    return jsonify({
-        "status": "ok",
-        "tesseract_installato": tesseract_path is not None,
-        "tesseract_path": tesseract_path,
-    })
+    api = bool(os.environ.get("OPENROUTER_API_KEY", ""))
+    return jsonify({"status": "ok", "openrouter": api})
 
 
 def _save_upload():
@@ -78,11 +164,6 @@ def _save_upload():
 
 @app.post("/parse")
 def parse_any_brand():
-    """
-    Riconosce il brand. MaxMara (veloce, deterministico) risponde subito (200).
-    Brand OCR (es. PT Torino) avviano un job in background e rispondono 202 con
-    job_id: il client deve fare polling su GET /jobs/<job_id>.
-    """
     path, err = _save_upload()
     if err:
         msg, code = err
@@ -100,26 +181,21 @@ def parse_any_brand():
         finally:
             os.unlink(path)
 
-    if brand is None:
-        os.unlink(path)
-        return jsonify({
-            "valido": False,
-            "errori": [{"globale": "template PDF non riconosciuto: nessun parser per questo brand"}],
-        }), 422
-
+    # Non-MaxMara: job asincrono con AI su Railway
     job_id = str(uuid.uuid4())
     with _jobs_lock:
         _jobs[job_id] = {"status": "processing"}
 
     def runner():
-        _run_job(job_id, path, lambda p: {**router_parse(p)})
+        _run_job(job_id, path, _analyze_with_ai)
 
     threading.Thread(target=runner, daemon=True).start()
+    brand_name = brand or "sconosciuto"
     return jsonify({
         "status": "processing",
         "job_id": job_id,
-        "brand": brand,
-        "messaggio": "Richiede OCR (tipicamente 1-2 minuti). Fai polling su GET /jobs/<job_id>.",
+        "brand": brand_name,
+        "messaggio": f"Sto leggendo l'ordine {brand_name}...",
     }), 202
 
 
@@ -138,7 +214,6 @@ def job_status(job_id):
 
 @app.post("/parse-maxmara")
 def parse_maxmara_endpoint():
-    """Mantenuto per compatibilita' con l'integrazione gia' attiva su Vercel."""
     path, err = _save_upload()
     if err:
         msg, code = err
