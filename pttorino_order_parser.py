@@ -1,6 +1,6 @@
 """
 Parser per ordini PT TORINO / COVER 50 (PDF combit List & Label, SENZA layer di testo).
-Pipeline: rasterizzazione 400 DPI -> OCR pagina per ancore (header, righe, prezzi) ->
+Pipeline: rasterizzazione 200 DPI -> OCR pagina per ancore (header, righe, prezzi) ->
 OCR cella-per-cella della griglia taglie (psm10, whitelist cifre) -> validazione
 aritmetica sui totali del documento (per-riga e globale).
 
@@ -13,7 +13,7 @@ import fitz
 import pytesseract
 from PIL import Image
 
-DPI = 400
+DPI = 200
 CELL_CFG = "--psm 10 -c tessedit_char_whitelist=0123456789"
 
 def _img(doc, i):
