@@ -12,7 +12,7 @@ REGOLE PROMPT GENERAZIONE: priorità assoluta = fedeltà del prodotto. prompt_st
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
-IMAGE_MODEL = "google/gemini-3-pro-image-preview"
+IMAGE_MODEL = "black-forest-labs/flux.2-dev"
 IMAGES_DIR = os.path.join(tempfile.gettempdir(), "studio_images")
 
 
@@ -37,6 +37,7 @@ def _analyze_product(photo_paths, label):
 
 
 def _generate_image(prompt, ref_b64, label="immagine"):
+    """Genera una immagine via OpenRouter."""
     import requests as req
     body = {"model": IMAGE_MODEL, "modalities": ["image"], "messages": [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref_b64}"}},
@@ -48,13 +49,33 @@ def _generate_image(prompt, ref_b64, label="immagine"):
     data = resp.json()
     if resp.status_code != 200: raise RuntimeError(f"Image gen error {resp.status_code}: {data}")
     msg = data.get("choices", [{}])[0].get("message", {})
+
+    # Try all possible places the image could be
     data_url = None
+
+    # Format A: message.images
     for img in msg.get("images", []):
         if "image_url" in img: data_url = img["image_url"].get("url", ""); break
+
+    # Format B: content array with image_url
     if not data_url:
         for part in msg.get("content", []):
             if isinstance(part, dict) and part.get("type") == "image_url":
                 data_url = part.get("image_url", {}).get("url", ""); break
+
+    # Format C: base64 data URL in text content
+    if not data_url:
+        text = msg.get("content", "")
+        if isinstance(text, str) and "data:image" in text:
+            import re
+            m = re.search(r'data:image/\w+;base64,[A-Za-z0-9+/=]+', text)
+            if m: data_url = m.group(0)
+
+    # Format D: raw text is base64
+    if not data_url:
+        text = msg.get("content", "") if isinstance(msg.get("content", ""), str) else str(msg)
+        if text.startswith("data:"): data_url = text
+
     if data_url and data_url.startswith("data:"):
         header, b64data = data_url.split(",", 1)
         ext = "png" if "png" in header else "jpg"
