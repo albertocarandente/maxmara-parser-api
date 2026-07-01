@@ -7,6 +7,7 @@ import os
 import base64
 import io
 import json
+import shutil
 import tempfile
 import threading
 import traceback

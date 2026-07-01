@@ -2,4 +2,6 @@ flask
 pymupdf
 pillow
 anthropic
+openai
+requests
 gunicorn
