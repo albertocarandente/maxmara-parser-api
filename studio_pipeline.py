@@ -12,7 +12,7 @@ REGOLE PROMPT GENERAZIONE: priorità assoluta = fedeltà del prodotto. prompt_st
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
-IMAGE_MODEL = "google/gemini-2.5-flash-image"
+IMAGE_MODEL = "google/gemini-2.5-flash-image-preview:free"
 IMAGES_DIR = os.path.join(tempfile.gettempdir(), "studio_images")
 
 
@@ -37,38 +37,32 @@ def _analyze_product(photo_paths, label):
 
 
 def _generate_image(prompt, ref_b64, label="immagine"):
-    """Genera una immagine via OpenRouter (Gemini Flash Image) con riferimento."""
-    client = _openrouter_client()
-    content = [
+    import requests as req
+    body = {"model": IMAGE_MODEL, "modalities": ["image"], "messages": [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref_b64}"}},
-        {"type": "text", "text": f"Genera una foto basata sull'immagine di riferimento. {prompt}"},
-    ]
-    resp = client.chat.completions.create(
-        model=IMAGE_MODEL,
-        messages=[{"role": "user", "content": content}],
-        modalities=["image", "text"],
-        max_tokens=4096,
-    )
-    # Extract generated images from response
-    images_data = getattr(resp.choices[0].message, 'images', None)
-    if images_data and len(images_data) > 0:
-        img = images_data[0]
-        if isinstance(img, dict) and 'image_url' in img:
-            url = img['image_url'].get('url', '')
-            if url.startswith('data:'):
-                # Base64 data URL -> save to file
-                header, b64data = url.split(',', 1)
-                ext = 'png' if 'png' in header else 'jpg'
-                os.makedirs(IMAGES_DIR, exist_ok=True)
-                filename = f"{uuid.uuid4().hex}.{ext}"
-                filepath = os.path.join(IMAGES_DIR, filename)
-                with open(filepath, 'wb') as f:
-                    f.write(base64.standard_b64decode(b64data))
-                return f"/studio/images/{filename}"
-            return url
-    return None
-
-
+        {"type": "text", "text": prompt},]}]}
+    resp = req.post("https://openrouter.ai/api/v1/chat/completions", json=body, headers={
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json",
+        "HTTP-Referer": "https://etienne-studio.vercel.app", "X-Title": "ETIENNE Studio",
+    }, timeout=90)
+    data = resp.json()
+    if resp.status_code != 200: raise RuntimeError(f"Image gen error {resp.status_code}: {data}")
+    msg = data.get("choices", [{}])[0].get("message", {})
+    data_url = None
+    for img in msg.get("images", []):
+        if "image_url" in img: data_url = img["image_url"].get("url", ""); break
+    if not data_url:
+        for part in msg.get("content", []):
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                data_url = part.get("image_url", {}).get("url", ""); break
+    if data_url and data_url.startswith("data:"):
+        header, b64data = data_url.split(",", 1)
+        ext = "png" if "png" in header else "jpg"
+        os.makedirs(IMAGES_DIR, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}.{ext}"
+        with open(os.path.join(IMAGES_DIR, filename), "wb") as f: f.write(base64.standard_b64decode(b64data))
+        return f"/studio/images/{filename}"
+    return data_url
 def _generate_images(ref_path, analysis):
     """1 still-life + 4 on-model via OpenRouter image gen."""
     with open(ref_path, "rb") as f:
