@@ -12,7 +12,7 @@ REGOLE PROMPT GENERAZIONE: priorità assoluta = fedeltà del prodotto. prompt_st
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
-IMAGE_MODEL = "google/gemini-2.5-flash-image-preview:free"
+IMAGE_MODEL = "google/gemini-2.5-flash-image-preview"
 IMAGES_DIR = os.path.join(tempfile.gettempdir(), "studio_images")
 
 
