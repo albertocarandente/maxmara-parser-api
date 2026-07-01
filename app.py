@@ -272,6 +272,15 @@ def studio_job_status(job_id):
     if job["status"] == "error": return jsonify({"status": "error", "error": job["error"]}), 500
     return jsonify(job["result"])
 
+@app.get("/studio/images/<filename>")
+def studio_image(filename):
+    from flask import send_file
+    from studio_pipeline import IMAGES_DIR
+    import os as _os
+    path = _os.path.join(IMAGES_DIR, filename)
+    if not _os.path.exists(path): return jsonify({"error": "not found"}), 404
+    return send_file(path, mimetype="image/png")
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)

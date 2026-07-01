@@ -1,5 +1,5 @@
-"""Studio AI — pipeline foto-prodotto per ETIENNE."""
-import os, json, time, base64, tempfile, shutil
+"""Studio AI — pipeline foto-prodotto per ETIENNE. OpenRouter per analisi + immagini."""
+import os, json, time, base64, tempfile, shutil, uuid
 from pathlib import Path
 
 PROMPT_CERVELLO = """Sei un produttore e-commerce senior e copywriter per una boutique multi-brand di lusso (ETIENNE). Ricevi le foto grezze di UN capo e una stringa "brand / modello / variante". Restituisci UN SOLO oggetto JSON valido, senza altro testo/markdown/backtick, con questa struttura: { "analisi": { categoria, sottocategoria, genere(uomo|donna|unisex), colore_principale, colori_secondari[], materiali[], composizione_percentuali(o null), dettagli_distintivi[], vestibilita, stagione, registro_stile, brand, modello_variante }, "contesto_onmodel": { ambientazione, stagione_luce, mood }, "copy_it": { titolo, descrizione_breve, descrizione_lunga_intro, bullet[], consigli_stile, nota_taglia, composizione }, "copy_en": { titolo, descrizione_breve, descrizione_lunga_intro, bullet[], consigli_stile, nota_taglia, composizione }, "prompt_still_life": "", "prompt_on_model": ["","","",""] }.
@@ -12,14 +12,19 @@ REGOLE PROMPT GENERAZIONE: priorità assoluta = fedeltà del prodotto. prompt_st
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
-HIGGSFIELD_API_KEY = os.environ.get("HIGGSFIELD_API_KEY", "")
-HIGGSFIELD_BASE = "https://platform.higgsfield.ai"
+IMAGE_MODEL = "google/gemini-2.5-flash-image"
+IMAGES_DIR = os.path.join(tempfile.gettempdir(), "studio_images")
+
+
+def _openrouter_client():
+    import openai
+    return openai.OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1",
+        default_headers={"HTTP-Referer": "https://etienne-studio.vercel.app", "X-Title": "ETIENNE Studio"})
 
 
 def _analyze_product(photo_paths, label):
-    import openai
-    client = openai.OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1",
-        default_headers={"HTTP-Referer": "https://etienne-studio.vercel.app", "X-Title": "ETIENNE Studio"})
+    """OpenRouter vision: analisi + copy."""
+    client = _openrouter_client()
     content = []
     for p in photo_paths:
         with open(p, "rb") as f:
@@ -31,58 +36,65 @@ def _analyze_product(photo_paths, label):
     return json.loads(raw)
 
 
-def _higgsfield_generate(model, prompt, ref_b64, aspect_ratio="4:5"):
-    import requests as req
-    body = {"prompt": prompt, "aspect_ratio": aspect_ratio, "image": f"data:image/jpeg;base64,{ref_b64}"}
-    resp = req.post(f"{HIGGSFIELD_BASE}/{model}", headers={
-        "Authorization": f"Key {HIGGSFIELD_API_KEY}", "Content-Type": "application/json", "Accept": "application/json"
-    }, json=body, timeout=30)
-    resp.raise_for_status()
-    d = resp.json()
-    return d.get("request_id") or d.get("job_id") or d.get("id")
-
-
-def _higgsfield_poll(job_id, timeout_seconds=120):
-    import requests as req
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        resp = req.get(f"{HIGGSFIELD_BASE}/requests/{job_id}/status", headers={"Authorization": f"Key {HIGGSFIELD_API_KEY}"}, timeout=15)
-        d = resp.json()
-        if d.get("status") in ("completed", "succeeded", "done"): return d
-        if d.get("status") in ("failed", "error"): raise RuntimeError(f"Higgsfield job fallito: {d}")
-        time.sleep(3)
-    raise TimeoutError(f"Higgsfield job {job_id} timeout")
+def _generate_image(prompt, ref_b64, label="immagine"):
+    """Genera una immagine via OpenRouter (Gemini Flash Image) con riferimento."""
+    client = _openrouter_client()
+    content = [
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref_b64}"}},
+        {"type": "text", "text": f"Genera una foto basata sull'immagine di riferimento. {prompt}"},
+    ]
+    resp = client.chat.completions.create(
+        model=IMAGE_MODEL,
+        messages=[{"role": "user", "content": content}],
+        modalities=["image", "text"],
+        max_tokens=4096,
+    )
+    # Extract generated images from response
+    images_data = getattr(resp.choices[0].message, 'images', None)
+    if images_data and len(images_data) > 0:
+        img = images_data[0]
+        if isinstance(img, dict) and 'image_url' in img:
+            url = img['image_url'].get('url', '')
+            if url.startswith('data:'):
+                # Base64 data URL -> save to file
+                header, b64data = url.split(',', 1)
+                ext = 'png' if 'png' in header else 'jpg'
+                os.makedirs(IMAGES_DIR, exist_ok=True)
+                filename = f"{uuid.uuid4().hex}.{ext}"
+                filepath = os.path.join(IMAGES_DIR, filename)
+                with open(filepath, 'wb') as f:
+                    f.write(base64.standard_b64decode(b64data))
+                return f"/studio/images/{filename}"
+            return url
+    return None
 
 
 def _generate_images(ref_path, analysis):
+    """1 still-life + 4 on-model via OpenRouter image gen."""
     with open(ref_path, "rb") as f:
         ref_b64 = base64.standard_b64encode(f.read()).decode()
     results = []
-    model = "higgsfield-ai/soul/standard"
 
     still = analysis.get("prompt_still_life", "")
     if still:
         try:
-            jid = _higgsfield_generate(model, still, ref_b64)
-            jr = _higgsfield_poll(jid)
-            imgs = jr.get("images") or [{}]
-            results.append({"tipo": "still_life", "url": imgs[0].get("url"), "higgsfield_job_id": jid})
+            url = _generate_image(still, ref_b64, "still_life")
+            results.append({"tipo": "still_life", "url": url})
         except Exception as e:
             results.append({"tipo": "still_life", "url": None, "error": str(e)})
 
     for idx, prompt in enumerate(analysis.get("prompt_on_model", [])[:4]):
         if not prompt: continue
         try:
-            jid = _higgsfield_generate(model, prompt, ref_b64)
-            jr = _higgsfield_poll(jid)
-            imgs = jr.get("images") or [{}]
-            results.append({"tipo": f"on_model_{idx+1}", "url": imgs[0].get("url"), "higgsfield_job_id": jid})
+            url = _generate_image(prompt, ref_b64, f"on_model_{idx+1}")
+            results.append({"tipo": f"on_model_{idx+1}", "url": url})
         except Exception as e:
             results.append({"tipo": f"on_model_{idx+1}", "url": None, "error": str(e)})
     return results
 
 
 def process_item(photo_paths, label):
+    """Pipeline completa: analisi + copy + immagini."""
     analysis = _analyze_product(photo_paths, label)
     immagini = _generate_images(photo_paths[0], analysis) if photo_paths else []
     return {"analisi": analysis.get("analisi", {}), "copy_it": analysis.get("copy_it", {}), "copy_en": analysis.get("copy_en", {}), "immagini": immagini}
