@@ -13,7 +13,7 @@ REGOLE PROMPT GENERAZIONE: priorità assoluta = fedeltà del prodotto. prompt_st
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
 IMAGE_MODEL = os.environ.get("IMAGE_GEN_MODEL", "google/gemini-3-pro-image")
-IMAGES_DIR = os.path.join(tempfile.gettempdir(), "studio_images")
+IMAGES_DIR = os.environ.get("STUDIO_IMAGES_DIR", os.path.join(tempfile.gettempdir(), "studio_images"))
 
 
 def _openrouter_client():
@@ -52,7 +52,12 @@ def _generate_image(prompt, ref_b64, label="immagine"):
     os.makedirs(IMAGES_DIR, exist_ok=True)
     filename = f"{uuid.uuid4().hex}.png"
     with open(os.path.join(IMAGES_DIR, filename), "wb") as f: f.write(base64.standard_b64decode(b64))
-    return f"/studio/images/{filename}"
+
+    # Absolute URL so Vercel frontend can load from Railway
+    base = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "") or os.environ.get("STUDIO_PUBLIC_BASE", "")
+    if base:
+        return f"https://{base}/studio/images/{filename}"
+    return f"/studio/images/{filename}"  # fallback (dev locale)
 def _generate_images(ref_path, analysis):
     """1 still-life + 4 on-model via OpenRouter image gen."""
     with open(ref_path, "rb") as f:
