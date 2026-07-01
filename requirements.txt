@@ -1,5 +1,5 @@
 flask
 pymupdf
-pytesseract
 pillow
+anthropic
 gunicorn

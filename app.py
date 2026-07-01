@@ -228,6 +228,42 @@ def parse_maxmara_endpoint():
         os.unlink(path)
 
 
+# ── Studio AI ────────────────────────────────────────────────────────────────
+
+_studio_jobs = {}
+_studio_lock = threading.Lock()
+
+@app.post("/studio/item")
+def studio_item():
+    if "foto" not in request.files: return jsonify({"error": "nessuna foto"}), 400
+    files = request.files.getlist("foto")
+    label = request.form.get("etichetta", "N/D / N/D / N/D")
+    if not files: return jsonify({"error": "nessuna foto"}), 400
+    tmp_dir = tempfile.mkdtemp(prefix="studio_")
+    photo_paths = []
+    for f in files:
+        p = os.path.join(tmp_dir, f.filename or "foto.jpg"); f.save(p); photo_paths.append(p)
+    job_id = str(uuid.uuid4())
+    with _studio_lock: _studio_jobs[job_id] = {"status": "processing", "label": label}
+    def runner():
+        try:
+            from studio_pipeline import process_item
+            r = process_item(photo_paths, label)
+            with _studio_lock: _studio_jobs[job_id] = {"status": "done", "result": r}
+        except Exception as e:
+            with _studio_lock: _studio_jobs[job_id] = {"status": "error", "error": str(e)}
+        finally: shutil.rmtree(tmp_dir, ignore_errors=True)
+    threading.Thread(target=runner, daemon=True).start()
+    return jsonify({"job_id": job_id, "label": label}), 202
+
+@app.get("/studio/jobs/<job_id>")
+def studio_job_status(job_id):
+    with _studio_lock: job = _studio_jobs.get(job_id)
+    if not job: return jsonify({"status": "not_found"}), 404
+    if job["status"] == "processing": return jsonify({"status": "processing"}), 202
+    if job["status"] == "error": return jsonify({"status": "error", "error": job["error"]}), 500
+    return jsonify(job["result"])
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
