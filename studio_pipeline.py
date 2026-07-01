@@ -58,7 +58,7 @@ def _generate_images(ref_path, analysis):
     with open(ref_path, "rb") as f:
         ref_b64 = base64.standard_b64encode(f.read()).decode()
     results = []
-    model = "higgsfield-ai/nano-banana-pro"
+    model = "higgsfield-ai/soul/standard"
 
     still = analysis.get("prompt_still_life", "")
     if still:
